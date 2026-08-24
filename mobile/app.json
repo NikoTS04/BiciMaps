@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "BiciMaps",
+    "slug": "bicimaps",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.bicimaps.app",
+      "config": {
+        "googleMaps": {
+          "apiKey": ""
+        }
+      },
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": {
+            "scheme": "bicimaps"
+          }
+        }
+      ],
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysPermission": "Allow BiciMaps to use your location for offline bike navigation."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1562f84f-59ad-4600-84ce-f3ef182e71cd"
+      }
+    }
+  }
+}

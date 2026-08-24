@@ -1,0 +1,21 @@
+{
+  "name": "bicimaps",
+  "version": "1.0.0",
+  "description": "Offline bicycle navigation app for Lima and Callao",
+  "main": "index.js",
+  "scripts": {
+    "parse:kml": "ts-node scripts/parse-kml.ts",
+    "test:routing": "ts-node scripts/test-routing.ts"
+  },
+  "dependencies": {
+    "@turf/turf": "^7.2.0",
+    "togeojson": "^0.16.0",
+    "xmldom": "^0.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/xmldom": "^0.1.31",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

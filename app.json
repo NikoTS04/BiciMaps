@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "8fd319e2-5706-4b6c-a588-2dc49c3d946a"
+      }
+    },
+    "android": {
+      "package": "com.nicolastssteam.bicimaps"
+    },
+    "ios": {
+      "bundleIdentifier": "com.nicolastssteam.bicimaps",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}

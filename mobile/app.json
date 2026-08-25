@@ -3,6 +3,9 @@
     "name": "BiciMaps",
     "slug": "bicimaps",
     "version": "1.0.0",
+    "splash": {
+      "backgroundColor": "#ffffff"
+    },
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "ios": {
@@ -10,11 +13,6 @@
     },
     "android": {
       "package": "com.bicimaps.app",
-      "config": {
-        "googleMaps": {
-          "apiKey": ""
-        }
-      },
       "intentFilters": [
         {
           "action": "VIEW",
@@ -34,7 +32,8 @@
         {
           "locationAlwaysPermission": "Allow BiciMaps to use your location for offline bike navigation."
         }
-      ]
+      ],
+      "@maplibre/maplibre-react-native"
     ],
     "extra": {
       "eas": {

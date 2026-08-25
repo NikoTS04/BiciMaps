@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, ScrollView } from 'react-native';
 import MapView, { Polyline, Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -15,6 +15,47 @@ export default function App() {
   const [routeCoordinates, setRouteCoordinates] = useState<any[]>([]);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean>(false);
+  const [visibleRegion, setVisibleRegion] = useState<any>({
+    latitude: -12.0855,
+    longitude: -77.0370,
+    latitudeDelta: 0.12,
+    longitudeDelta: 0.12,
+  });
+
+  // Optimize Map rendering using viewport bounding box filtering
+  const visibleBikeLanes = useMemo(() => {
+    if (!visibleRegion) return bikeLanes;
+    const minLat = visibleRegion.latitude - visibleRegion.latitudeDelta / 2;
+    const maxLat = visibleRegion.latitude + visibleRegion.latitudeDelta / 2;
+    const minLng = visibleRegion.longitude - visibleRegion.longitudeDelta / 2;
+    const maxLng = visibleRegion.longitude + visibleRegion.longitudeDelta / 2;
+
+    return bikeLanes.filter((feature) => {
+      if (feature && feature.geometry && feature.geometry.type === 'LineString' && Array.isArray(feature.geometry.coordinates)) {
+        return feature.geometry.coordinates.some((coord: number[]) => {
+          const [lng, lat] = coord;
+          return lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng;
+        });
+      }
+      return false;
+    });
+  }, [visibleRegion, bikeLanes]);
+
+  const visibleAmenities = useMemo(() => {
+    if (!visibleRegion) return amenities;
+    const minLat = visibleRegion.latitude - visibleRegion.latitudeDelta / 2;
+    const maxLat = visibleRegion.latitude + visibleRegion.latitudeDelta / 2;
+    const minLng = visibleRegion.longitude - visibleRegion.longitudeDelta / 2;
+    const maxLng = visibleRegion.longitude + visibleRegion.longitudeDelta / 2;
+
+    return amenities.filter((feature) => {
+      if (feature && feature.geometry && feature.geometry.type === 'Point' && Array.isArray(feature.geometry.coordinates)) {
+        const [lng, lat] = feature.geometry.coordinates;
+        return lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng;
+      }
+      return false;
+    });
+  }, [visibleRegion, amenities]);
 
   useEffect(() => {
     if (bikelanesData && bikelanesData.features) {
@@ -115,9 +156,10 @@ export default function App() {
             latitudeDelta: 0.12,
             longitudeDelta: 0.12,
           }}
+          onRegionChangeComplete={setVisibleRegion}
         >
           {/* Render Bike Lanes (Ciclovías) */}
-          {bikeLanes.map((feature, index) => {
+          {visibleBikeLanes.map((feature, index) => {
             if (feature && feature.geometry && feature.geometry.type === 'LineString' && Array.isArray(feature.geometry.coordinates)) {
               const coords = feature.geometry.coordinates
                 .filter((coord: any) => Array.isArray(coord) && coord.length >= 2 && typeof coord[0] === 'number' && typeof coord[1] === 'number' && !isNaN(coord[0]) && !isNaN(coord[1]))
@@ -149,7 +191,7 @@ export default function App() {
           )}
 
           {/* Render Amenities / Parking */}
-          {amenities.slice(0, 100).map((feature, index) => {
+          {visibleAmenities.slice(0, 150).map((feature, index) => {
             if (feature && feature.geometry && feature.geometry.type === 'Point' && Array.isArray(feature.geometry.coordinates) && feature.geometry.coordinates.length >= 2) {
               const [lng, lat] = feature.geometry.coordinates;
               if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {

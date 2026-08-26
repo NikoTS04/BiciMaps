@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, ScrollView, TextInput, FlatList, Keyboard } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
@@ -49,6 +49,9 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [destination, setDestination] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
+
+  // Prevent stitching race conditions
+  const routeRequestRef = useRef<number>(0);
 
   // Bounding box region for viewport-based layers optimization
   const [visibleRegion, setVisibleRegion] = useState<any>({
@@ -232,12 +235,54 @@ export default function App() {
     }
   };
 
+  // Asynchronously query OSRM to stitch street-aligned paths over straight-line transitions
+  const fetchOSRMTransitions = async (
+    baseCoords: number[][],
+    transitions: any[],
+    requestId: number
+  ) => {
+    let stitchedCoords = [...baseCoords];
+    let offset = 0;
+
+    for (let t of transitions) {
+      // Abort if route has changed since task started
+      if (requestId !== routeRequestRef.current) return;
+
+      try {
+        const url = `https://router.project-osrm.org/route/v1/driving/${t.startCoord[0]},${t.startCoord[1]};${t.endCoord[0]},${t.endCoord[1]}?overview=full&geometries=geojson`;
+        const response = await fetch(url);
+        
+        if (requestId !== routeRequestRef.current) return;
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.routes && data.routes[0] && data.routes[0].geometry) {
+            const streetCoords = data.routes[0].geometry.coordinates;
+            if (Array.isArray(streetCoords) && streetCoords.length > 0) {
+              const insertIdx = t.startIndex + offset;
+              const deleteCount = 2; // replace straight start and end coordinate points
+              
+              stitchedCoords.splice(insertIdx, deleteCount, ...streetCoords);
+              offset += streetCoords.length - deleteCount;
+              
+              setRouteCoordinates([...stitchedCoords]);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to fetch OSRM road-aligned gap:", error);
+      }
+    }
+  };
+
   // Triggered when user selects a destination from the list
   const selectDestination = (item: any) => {
     Keyboard.dismiss();
     setDestination(item);
     setSearchQuery(item.name);
     setSearchResults([]);
+
+    const requestId = ++routeRequestRef.current;
 
     // Update map view to destination
     setCameraCenter([item.longitude, item.latitude]);
@@ -258,6 +303,11 @@ export default function App() {
         setRouteInfo(
           `Navigating to ${item.name}! Distance: ~${(route.distanceKm * 1000).toFixed(0)}m (${route.distanceKm.toFixed(2)} km)`
         );
+
+        // Fetch street-aligned routes for transitions if online
+        if (route.transitions && route.transitions.length > 0) {
+          fetchOSRMTransitions(maplibreCoords, route.transitions, requestId);
+        }
       } else {
         setRouteInfo(`No connected bike lane path found to ${item.name}.`);
       }

@@ -8,6 +8,14 @@ interface NodeInfo {
   coord: [number, number];
   key: string;
   isEndpoint: boolean;
+  featureIndex: number;
+}
+
+export interface TransitionSegment {
+  startIndex: number;
+  endIndex: number;
+  startCoord: [number, number];
+  endCoord: [number, number];
 }
 
 // Binary Min-Heap Priority Queue for O(log N) Dijkstra performance
@@ -64,13 +72,13 @@ class MinHeap {
 let routingGraph: Graph | null = null;
 let graphNodes: NodeInfo[] = [];
 const grid: { [key: string]: NodeInfo[] } = {};
+const nativeEdges = new Set<string>();
 
 const GRID_CELL_SIZE = 0.01; // approx 1.1km
-const ROAD_PENALTY_MULTIPLIER = 5.0; // Prefer bike lanes up to a 5x longer detour
+const ROAD_PENALTY_MULTIPLIER = 2.5; // Detours on bike lanes preferred up to 2.5x distance of road shortcut
 const TRANSITION_THRESHOLD_KM = 1.5; // Max gap distance to connect disconnected bike lanes
 
 // At -12 degrees latitude (Lima/Callao), 1 deg longitude is approx 108.8 km, 1 deg latitude is 110.6 km.
-// Euclidean distance is 99.9% accurate at city scales and 100x faster than turf geodesic calculations.
 const LAT_DEGREE_KM = 110.6;
 const LNG_DEGREE_KM = 108.8;
 
@@ -108,9 +116,10 @@ function getGridCellsInRadius(coord: [number, number], radius: number): string[]
 function buildGraph(features: any[]): { graph: Graph; nodes: NodeInfo[] } {
   const graph: Graph = {};
   const nodesMap = new Map<string, NodeInfo>();
+  nativeEdges.clear();
 
   // 1. Load bike lanes and build baseline connections
-  features.forEach((feature) => {
+  features.forEach((feature, featureIndex) => {
     if (feature && feature.geometry && feature.geometry.type === 'LineString' && Array.isArray(feature.geometry.coordinates)) {
       const coords = feature.geometry.coordinates;
       for (let i = 0; i < coords.length; i++) {
@@ -124,6 +133,7 @@ function buildGraph(features: any[]): { graph: Graph; nodes: NodeInfo[] } {
             coord: currentCoord as [number, number],
             key: currentKey,
             isEndpoint: false,
+            featureIndex,
           });
         }
 
@@ -149,6 +159,10 @@ function buildGraph(features: any[]): { graph: Graph; nodes: NodeInfo[] } {
               graph[prevKey] = {};
             }
             graph[prevKey][currentKey] = dist;
+
+            // Record native bike lane edges
+            nativeEdges.add(`${currentKey}-${prevKey}`);
+            nativeEdges.add(`${prevKey}-${currentKey}`);
           }
         }
       }
@@ -172,31 +186,37 @@ function buildGraph(features: any[]): { graph: Graph; nodes: NodeInfo[] } {
   // 3. Connect close disconnected bike lanes (transitions through regular roads)
   nodesList.forEach((node) => {
     // Topologically, transition entry/exit points are intersections or ends of segments.
-    // Restricting transitions to endpoints makes the graph 4x faster to construct.
     if (!node.isEndpoint) return;
 
     const cells = getGridCellsInRadius(node.coord, 2); // check 5x5 grid cells neighborhood
-    const candidates: { key: string; dist: number }[] = [];
+    
+    // Group neighbors by featureIndex to select only the single best candidate per neighboring lane.
+    const bestPerFeature = new Map<number, { key: string; dist: number }>();
 
     cells.forEach((cellKey) => {
       const neighbors = grid[cellKey];
       if (neighbors) {
         neighbors.forEach((neighbor) => {
           if (node.key === neighbor.key) return;
+          if (node.featureIndex === neighbor.featureIndex) return; // Don't bridge within the same segment
 
           // If not already connected natively as part of the same bike lane
           const edgeExists = graph[node.key] && graph[node.key][neighbor.key] !== undefined;
           if (!edgeExists) {
             const dist = getDistanceKm(node.coord, neighbor.coord);
             if (dist <= TRANSITION_THRESHOLD_KM) {
-              candidates.push({ key: neighbor.key, dist });
+              const existing = bestPerFeature.get(neighbor.featureIndex);
+              if (!existing || dist < existing.dist) {
+                bestPerFeature.set(neighbor.featureIndex, { key: neighbor.key, dist });
+              }
             }
           }
         });
       }
     });
 
-    // Capping: Sort candidates by distance and connect only the nearest 3
+    // Sort best feature candidates by distance and connect the nearest 3
+    const candidates = Array.from(bestPerFeature.values());
     candidates.sort((a, b) => a.dist - b.dist);
     candidates.slice(0, 3).forEach((cand) => {
       const cost = cand.dist * ROAD_PENALTY_MULTIPLIER;
@@ -262,7 +282,11 @@ export function findBikeRoute(
   origin: [number, number], // [lng, lat]
   destination: [number, number], // [lng, lat]
   features: any[]
-): { coordinates: { latitude: number; longitude: number }[]; distanceKm: number } {
+): {
+  coordinates: { latitude: number; longitude: number }[];
+  distanceKm: number;
+  transitions: TransitionSegment[];
+} {
   // Lazy build graph once
   if (!routingGraph || graphNodes.length === 0) {
     const built = buildGraph(features);
@@ -279,6 +303,12 @@ export function findBikeRoute(
         { latitude: destination[1], longitude: destination[0] },
       ],
       distanceKm: directDist,
+      transitions: [{
+        startIndex: 0,
+        endIndex: 1,
+        startCoord: origin,
+        endCoord: destination,
+      }],
     };
   }
 
@@ -382,6 +412,22 @@ export function findBikeRoute(
     pathCoords[pathCoords.length - 1] = destination;
   }
 
+  // Identify virtual transition segments (edges not in nativeEdges)
+  const transitions: TransitionSegment[] = [];
+  for (let i = 0; i < pathCoords.length - 1; i++) {
+    const keyA = getCoordKey(pathCoords[i]);
+    const keyB = getCoordKey(pathCoords[i + 1]);
+    const isNative = nativeEdges.has(`${keyA}-${keyB}`);
+    if (!isNative) {
+      transitions.push({
+        startIndex: i,
+        endIndex: i + 1,
+        startCoord: pathCoords[i],
+        endCoord: pathCoords[i + 1],
+      });
+    }
+  }
+
   const formattedCoords = pathCoords.map((coord) => ({
     latitude: coord[1],
     longitude: coord[0],
@@ -390,5 +436,6 @@ export function findBikeRoute(
   return {
     coordinates: formattedCoords,
     distanceKm: calculatedDist,
+    transitions,
   };
 }

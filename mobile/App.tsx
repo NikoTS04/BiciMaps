@@ -44,11 +44,19 @@ export default function App() {
   const [showBikeLanes, setShowBikeLanes] = useState<boolean>(true);
   const [showAmenities, setShowAmenities] = useState<boolean>(true);
 
-  // Bookmarks states
+  // Bookmarks / Home & Work states
   const [homeLocation, setHomeLocation] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
   const [workLocation, setWorkLocation] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
 
-  // Active navigation HUD mode state
+  // Custom Favorites states (manage custom places list)
+  const [customFavorites, setCustomFavorites] = useState<any[]>([]);
+  const [newFavName, setNewFavName] = useState<string>('');
+  const [newFavQuery, setNewFavQuery] = useState<string>('');
+  const [newFavLocation, setNewFavLocation] = useState<any | null>(null);
+
+  // UI state toggles
+  const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
+  const [isSearchExpanded, setIsSearchExpanded] = useState<boolean>(false);
   const [isNavigating, setIsNavigating] = useState<boolean>(false);
 
   // Prevent stitching race conditions
@@ -133,8 +141,20 @@ export default function App() {
       const work = await AsyncStorage.getItem('bicimaps_work');
       if (home) setHomeLocation(JSON.parse(home));
       if (work) setWorkLocation(JSON.parse(work));
+      
+      loadCustomFavorites();
     } catch (e) {
       console.warn('Failed to load favorites', e);
+    }
+  };
+
+  // Load custom favorites list
+  const loadCustomFavorites = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('bicimaps_custom_favorites');
+      if (stored) setCustomFavorites(JSON.parse(stored));
+    } catch (e) {
+      console.warn('Failed to load custom favorites', e);
     }
   };
 
@@ -147,6 +167,43 @@ export default function App() {
       alert(`${type === 'home' ? 'Home' : 'Work'} location saved successfully!`);
     } catch (e) {
       console.warn('Failed to save favorite', e);
+    }
+  };
+
+  // Save custom favorited place list
+  const addCustomFavorite = async () => {
+    if (!newFavName.trim() || !newFavLocation) {
+      alert('Please enter a name and search/select a valid location first.');
+      return;
+    }
+    const newFav = {
+      id: `fav-${Date.now()}`,
+      name: newFavName.trim(),
+      latitude: newFavLocation.latitude,
+      longitude: newFavLocation.longitude,
+      address: newFavLocation.name,
+    };
+    const updated = [...customFavorites, newFav];
+    try {
+      await AsyncStorage.setItem('bicimaps_custom_favorites', JSON.stringify(updated));
+      setCustomFavorites(updated);
+      setNewFavName('');
+      setNewFavQuery('');
+      setNewFavLocation(null);
+      alert('Favorite added successfully!');
+    } catch (e) {
+      console.warn('Failed to save custom favorite', e);
+    }
+  };
+
+  // Delete favorite place from list
+  const deleteCustomFavorite = async (id: string) => {
+    const updated = customFavorites.filter(fav => fav.id !== id);
+    try {
+      await AsyncStorage.setItem('bicimaps_custom_favorites', JSON.stringify(updated));
+      setCustomFavorites(updated);
+    } catch (e) {
+      console.warn('Failed to delete favorite', e);
     }
   };
 
@@ -171,17 +228,57 @@ export default function App() {
     features: amenities.slice(0, 150),
   }), [amenities]);
 
-  const routeGeoJSON = useMemo(() => {
-    if (routeCoordinates.length === 0) return null;
+  // Dynamically split path progress based on user's current GPS location relative to route coordinates
+  const routeProgress = useMemo(() => {
+    if (routeCoordinates.length === 0 || !userLocation) {
+      return { covered: [], remaining: routeCoordinates };
+    }
+
+    const userCoord: [number, number] = [userLocation.longitude, userLocation.latitude];
+    let closestIdx = 0;
+    let minDistance = Infinity;
+
+    // Find route coordinate closest to cyclist GPS dot
+    for (let i = 0; i < routeCoordinates.length; i++) {
+      const dx = (routeCoordinates[i][0] - userCoord[0]) * 108.8;
+      const dy = (routeCoordinates[i][1] - userCoord[1]) * 110.6;
+      const dist = dx * dx + dy * dy;
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestIdx = i;
+      }
+    }
+
+    // Split route polyline into covered (gray) and remaining (blue)
+    const covered = routeCoordinates.slice(0, closestIdx + 1);
+    const remaining = [userCoord, ...routeCoordinates.slice(closestIdx + 1)];
+
+    return { covered, remaining };
+  }, [routeCoordinates, userLocation]);
+
+  const coveredGeoJSON = useMemo(() => {
+    if (routeProgress.covered.length === 0) return null;
     return {
       type: 'Feature' as const,
       geometry: {
         type: 'LineString' as const,
-        coordinates: routeCoordinates,
+        coordinates: routeProgress.covered,
       },
       properties: {},
     };
-  }, [routeCoordinates]);
+  }, [routeProgress.covered]);
+
+  const remainingGeoJSON = useMemo(() => {
+    if (routeProgress.remaining.length === 0) return null;
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'LineString' as const,
+        coordinates: routeProgress.remaining,
+      },
+      properties: {},
+    };
+  }, [routeProgress.remaining]);
 
   // Synchronize manual user map panning/zooming back to component states
   const handleRegionChange = (feature: any) => {
@@ -294,8 +391,10 @@ export default function App() {
       if (requestId !== routeRequestRef.current) return;
 
       try {
-        const url = `https://router.project-osrm.org/route/v1/foot/${t.startCoord[0]},${t.startCoord[1]};${t.endCoord[0]},${t.endCoord[1]}?overview=full&geometries=geojson`;
-        const response = await fetch(url);
+        const url = `https://routing.openstreetmap.de/routed-bike/route/v1/driving/${t.startCoord[0]},${t.startCoord[1]};${t.endCoord[0]},${t.endCoord[1]}?overview=full&geometries=geojson`;
+        const response = await fetch(url, {
+          headers: { 'User-Agent': 'BiciMapsApp/1.0' }
+        });
         
         if (requestId !== routeRequestRef.current) return;
 
@@ -439,110 +538,220 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Floating HUD Search Bar & Shortcuts */}
-      <View style={styles.searchContainer}>
-        {/* Origin Search Field */}
-        <View style={[styles.searchBarRow, searchFocused === 'origin' && styles.searchBarRowActive]}>
-          <Text style={styles.searchPrefix}>🟢 From:</Text>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="My Location (GPS)"
-            placeholderTextColor="#94a3b8"
-            value={origin ? origin.name : originSearchQuery}
-            onChangeText={handleSearch}
-            onFocus={() => {
-              setSearchFocused('origin');
-              setSearchResults([]);
-            }}
-          />
-          {origin && (
-            <TouchableOpacity style={styles.clearButton} onPress={clearOrigin}>
-              <Text style={styles.clearButtonText}>✕</Text>
-            </TouchableOpacity>
-          )}
+      {/* Drawer Overlay Menu Sidebar (Manage bookmarks offline/online) */}
+      {isDrawerOpen && (
+        <View style={styles.drawerOverlay}>
+          <TouchableOpacity style={styles.drawerBackdrop} onPress={() => setIsDrawerOpen(false)} />
+          <View style={styles.drawerContainer}>
+            <SafeAreaView style={styles.drawerSafeArea}>
+              <View style={styles.drawerHeader}>
+                <Text style={styles.drawerTitle}>BiciMaps Menu</Text>
+                <TouchableOpacity onPress={() => setIsDrawerOpen(false)} style={styles.drawerCloseButton}>
+                  <Text style={styles.drawerCloseText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.drawerContent}>
+                {/* Layer visibility switches inside Drawer */}
+                <Text style={styles.drawerSectionTitle}>Map Layers</Text>
+                <View style={styles.drawerTogglesContainer}>
+                  <TouchableOpacity 
+                    style={[styles.filterChip, showBikeLanes && styles.filterChipActive]} 
+                    onPress={() => setShowBikeLanes(prev => !prev)}
+                  >
+                    <Text style={[styles.filterChipText, showBikeLanes && styles.filterChipTextActive]}>
+                      🚴 Ciclovías: {showBikeLanes ? 'ON' : 'OFF'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.filterChip, showAmenities && styles.filterChipActive]} 
+                    onPress={() => setShowAmenities(prev => !prev)}
+                  >
+                    <Text style={[styles.filterChipText, showAmenities && styles.filterChipTextActive]}>
+                      🅿️ Parking: {showAmenities ? 'ON' : 'OFF'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.drawerDivider} />
+
+                {/* Search & Add new favorite location */}
+                <Text style={styles.drawerSectionTitle}>Add Custom Place</Text>
+                <View style={styles.addFavForm}>
+                  <TextInput
+                    style={styles.drawerInput}
+                    placeholder="1. Enter name (e.g. Work, Bakery)"
+                    placeholderTextColor="#94a3b8"
+                    value={newFavName}
+                    onChangeText={setNewFavName}
+                  />
+                  
+                  <TextInput
+                    style={styles.drawerInput}
+                    placeholder="2. Search address online..."
+                    placeholderTextColor="#94a3b8"
+                    value={newFavQuery}
+                    onChangeText={async (text) => {
+                      setNewFavQuery(text);
+                      if (text.length >= 3) {
+                        try {
+                          const response = await fetch(
+                            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(text)}&format=json&limit=1&viewbox=-77.20,-11.90,-76.85,-12.25&bounded=1`,
+                            { headers: { 'User-Agent': 'BiciMapsApp/1.0' } }
+                          );
+                          if (response.ok) {
+                            const data = await response.json();
+                            if (data[0]) {
+                              setNewFavLocation({
+                                name: data[0].display_name.split(',')[0],
+                                latitude: parseFloat(data[0].lat),
+                                longitude: parseFloat(data[0].lon),
+                              });
+                            }
+                          }
+                        } catch (e) {
+                          console.warn(e);
+                        }
+                      }
+                    }}
+                  />
+                  {newFavLocation && (
+                    <Text style={styles.favMatchText}>📍 Matched: {newFavLocation.name}</Text>
+                  )}
+
+                  <TouchableOpacity style={styles.addFavButton} onPress={addCustomFavorite}>
+                    <Text style={styles.addFavButtonText}>Save Favorite Place</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.drawerDivider} />
+
+                {/* List of custom favorite bookmarked locations */}
+                <Text style={styles.drawerSectionTitle}>Saved Places</Text>
+                {customFavorites.length === 0 ? (
+                  <Text style={styles.noFavsText}>No custom places saved yet.</Text>
+                ) : (
+                  customFavorites.map((fav) => (
+                    <View key={fav.id} style={styles.favListItem}>
+                      <TouchableOpacity 
+                        style={styles.favListDetails}
+                        onPress={() => {
+                          selectLocation(fav);
+                          setIsDrawerOpen(false);
+                        }}
+                      >
+                        <Text style={styles.favListTitle}>⭐ {fav.name}</Text>
+                        <Text style={styles.favListSubtitle} numberOfLines={1}>{fav.address}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => deleteCustomFavorite(fav.id)} style={styles.deleteFavButton}>
+                        <Text style={styles.deleteFavText}>🗑️</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            </SafeAreaView>
+          </View>
         </View>
+      )}
 
-        {/* Separator Line */}
-        <View style={styles.searchSeparator} />
-
-        {/* Destination Search Field */}
-        <View style={[styles.searchBarRow, searchFocused === 'destination' && styles.searchBarRowActive]}>
-          <Text style={styles.searchPrefix}>🔴 To:</Text>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search address or bike facility..."
-            placeholderTextColor="#94a3b8"
-            value={destination ? destination.name : searchQuery}
-            onChangeText={handleSearch}
-            onFocus={() => {
-              setSearchFocused('destination');
-              setSearchResults([]);
-            }}
-          />
-          {destination && (
-            <TouchableOpacity style={styles.clearButton} onPress={clearSearch}>
-              <Text style={styles.clearButtonText}>✕</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Favorite Places row */}
-        {!destination && searchQuery.length === 0 && originSearchQuery.length === 0 && (
-          <View style={styles.favoritesRow}>
-            <TouchableOpacity style={styles.favoriteButton} onPress={() => navigateToFavorite('home')}>
-              <Text style={styles.favoriteButtonText}>
-                🏠 Home: {homeLocation ? 'Go' : 'Set'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.favoriteButton} onPress={() => navigateToFavorite('work')}>
-              <Text style={styles.favoriteButtonText}>
-                💼 Work: {workLocation ? 'Go' : 'Set'}
-              </Text>
+      {/* Floating HUD Search Bar & Shortcuts at the bottom half of the screen */}
+      {isSearchExpanded && !destination && (
+        <View style={styles.expandedSearchCard}>
+          <View style={styles.hudHeader}>
+            <Text style={styles.hudDestName}>Plan Route</Text>
+            <TouchableOpacity onPress={() => setIsSearchExpanded(false)} style={styles.hudCloseButton}>
+              <Text style={styles.hudCloseText}>✕</Text>
             </TouchableOpacity>
           </View>
-        )}
 
-        {/* Search results dropdown */}
-        {searchResults.length > 0 && (
-          <FlatList
-            style={styles.resultsList}
-            data={searchResults}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.resultItem} onPress={() => selectLocation(item)}>
-                <Text style={styles.resultText}>
-                  {item.name}{' '}
-                  {item.isOffline ? (
-                    <Text style={styles.resultBadge}>[Offline]</Text>
-                  ) : null}
-                </Text>
+          {/* From Input */}
+          <View style={[styles.searchBarRow, searchFocused === 'origin' && styles.searchBarRowActive]}>
+            <Text style={styles.searchPrefix}>🟢 From:</Text>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="My Location (GPS)"
+              placeholderTextColor="#94a3b8"
+              value={origin ? origin.name : originSearchQuery}
+              onChangeText={handleSearch}
+              onFocus={() => {
+                setSearchFocused('origin');
+                setSearchResults([]);
+              }}
+            />
+            {origin && (
+              <TouchableOpacity style={styles.clearButton} onPress={clearOrigin}>
+                <Text style={styles.clearButtonText}>✕</Text>
               </TouchableOpacity>
             )}
-          />
-        )}
-
-        {/* Layer Visibility Toggle Chips */}
-        {!destination && searchQuery.length === 0 && originSearchQuery.length === 0 && (
-          <View style={styles.filterChipsRow}>
-            <TouchableOpacity 
-              style={[styles.filterChip, showBikeLanes && styles.filterChipActive]} 
-              onPress={() => setShowBikeLanes(prev => !prev)}
-            >
-              <Text style={[styles.filterChipText, showBikeLanes && styles.filterChipTextActive]}>
-                🚴 Ciclovías: {showBikeLanes ? 'ON' : 'OFF'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={[styles.filterChip, showAmenities && styles.filterChipActive]} 
-              onPress={() => setShowAmenities(prev => !prev)}
-            >
-              <Text style={[styles.filterChipText, showAmenities && styles.filterChipTextActive]}>
-                🅿️ Bici-Parking: {showAmenities ? 'ON' : 'OFF'}
-              </Text>
-            </TouchableOpacity>
           </View>
-        )}
-      </View>
+
+          <View style={styles.searchSeparator} />
+
+          {/* To Input */}
+          <View style={[styles.searchBarRow, searchFocused === 'destination' && styles.searchBarRowActive]}>
+            <Text style={styles.searchPrefix}>🔴 To:</Text>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search address or bike facility..."
+              placeholderTextColor="#94a3b8"
+              value={destination ? destination.name : searchQuery}
+              onChangeText={handleSearch}
+              onFocus={() => {
+                setSearchFocused('destination');
+                setSearchResults([]);
+              }}
+            />
+            {destination && (
+              <TouchableOpacity style={styles.clearButton} onPress={clearSearch}>
+                <Text style={styles.clearButtonText}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Shortcuts */}
+          {!destination && searchQuery.length === 0 && originSearchQuery.length === 0 && (
+            <View style={styles.favoritesRow}>
+              <TouchableOpacity style={styles.favoriteButton} onPress={() => {
+                navigateToFavorite('home');
+                setIsSearchExpanded(false);
+              }}>
+                <Text style={styles.favoriteButtonText}>🏠 Home</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.favoriteButton} onPress={() => {
+                navigateToFavorite('work');
+                setIsSearchExpanded(false);
+              }}>
+                <Text style={styles.favoriteButtonText}>💼 Work</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Search results list in expanded search */}
+          {searchResults.length > 0 && (
+            <FlatList
+              style={styles.expandedResultsList}
+              data={searchResults}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <TouchableOpacity style={styles.resultItem} onPress={() => {
+                  selectLocation(item);
+                  if (searchFocused === 'destination' || origin) {
+                    setIsSearchExpanded(false);
+                  }
+                }}>
+                  <Text style={styles.resultText}>
+                    {item.name}{' '}
+                    {item.isOffline ? (
+                      <Text style={styles.resultBadge}>[Offline]</Text>
+                    ) : null}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            />
+          )}
+        </View>
+      )}
 
       {/* Top Guidance Direction HUD */}
       {isNavigating && destination && (
@@ -615,13 +824,29 @@ export default function App() {
             </MapLibreGL.ShapeSource>
           )}
 
-          {/* Render Calculated Dijkstra Route */}
-          {routeGeoJSON && (
-            <MapLibreGL.ShapeSource id="routeSource" shape={routeGeoJSON}>
+          {/* Render Covered Progress Trail (Slate Gray) */}
+          {coveredGeoJSON && (
+            <MapLibreGL.ShapeSource id="coveredSource" shape={coveredGeoJSON}>
               <MapLibreGL.LineLayer
-                id="routeLayer"
+                id="coveredLayer"
                 style={{
-                  lineColor: '#3b82f6', // Waze Blue
+                  lineColor: '#64748b', // Slate Gray
+                  lineWidth: 6,
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                  lineOpacity: 0.6,
+                }}
+              />
+            </MapLibreGL.ShapeSource>
+          )}
+
+          {/* Render Remaining Route (Waze Blue) */}
+          {remainingGeoJSON && (
+            <MapLibreGL.ShapeSource id="remainingSource" shape={remainingGeoJSON}>
+              <MapLibreGL.LineLayer
+                id="remainingLayer"
+                style={{
+                  lineColor: '#2563eb', // Royal Blue
                   lineWidth: 6,
                   lineCap: 'round',
                   lineJoin: 'round',
@@ -643,7 +868,11 @@ export default function App() {
       </View>
 
       {/* Floating Action Buttons (Zoom & GPS Re-center) */}
-      <View style={[styles.floatingButtonsContainer, destination && { bottom: 185 }]}>
+      <View style={[
+        styles.floatingButtonsContainer, 
+        destination && { bottom: 185 },
+        isSearchExpanded && { bottom: 200 }
+      ]}>
         {/* Zoom In */}
         <TouchableOpacity style={styles.floatingButton} onPress={() => setCameraZoom((prev) => Math.min(prev + 1, 20))}>
           <Text style={styles.buttonIconText}>＋</Text>
@@ -663,7 +892,7 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
-      {/* Control Panel / Bottom HUD Sheet */}
+      {/* Control Panel / Bottom HUD Sheet (Thumb-Centric) */}
       {destination ? (
         <View style={styles.bottomHUDCard}>
           <View style={styles.hudHeader}>
@@ -714,11 +943,21 @@ export default function App() {
           </View>
         </View>
       ) : (
-        <View style={styles.controlPanel}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.infoScroll}>
-            <Text style={styles.infoText}>{routeInfo}</Text>
-          </ScrollView>
-        </View>
+        // Idle state: Compact bottom bar within the thumb zone
+        !isSearchExpanded && (
+          <View style={styles.compactBottomBar}>
+            <TouchableOpacity style={styles.barIconButton} onPress={() => setIsDrawerOpen(true)}>
+              <Text style={styles.barIconText}>☰</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity style={styles.barSearchInput} onPress={() => {
+              setIsSearchExpanded(true);
+              setSearchFocused('destination');
+            }}>
+              <Text style={styles.barSearchPlaceholder}>🔍 Where to?</Text>
+            </TouchableOpacity>
+          </View>
+        )
       )}
     </SafeAreaView>
   );
@@ -731,25 +970,18 @@ const styles = StyleSheet.create({
   },
   searchContainer: {
     position: 'absolute',
-    top: 50, // Avoid status bar overlap
+    top: 50, // Floating slightly at top for expanded dropdown sizing inside card
     left: 16,
     right: 16,
     zIndex: 10,
-    backgroundColor: '#1e293b',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
   },
   searchBarRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingRight: 8,
+    backgroundColor: '#1e293b',
+    borderRadius: 8,
   },
   searchBarRowActive: {
     backgroundColor: '#0f172a',
@@ -842,8 +1074,6 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     justifyContent: 'space-between',
     paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#334155',
   },
   favoriteButton: {
     flex: 1,
@@ -862,7 +1092,7 @@ const styles = StyleSheet.create({
   },
   guidanceHUD: {
     position: 'absolute',
-    top: 210, // Shift down to avoid overlap with double search inputs
+    top: 50,
     left: 16,
     right: 16,
     zIndex: 10,
@@ -1061,5 +1291,214 @@ const styles = StyleSheet.create({
     color: '#cbd5e1',
     fontSize: 12,
     fontWeight: '600',
+  },
+
+  // Compact Bottom Bar inside thumb zone
+  compactBottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 75,
+    backgroundColor: '#1e293b',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+    zIndex: 9,
+  },
+  barIconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#334155',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  barIconText: {
+    color: '#f8fafc',
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  barSearchInput: {
+    flex: 1,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#334155',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  barSearchPlaceholder: {
+    color: '#94a3b8',
+    fontSize: 15,
+  },
+
+  // Expanded Search Card
+  expandedSearchCard: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#1e293b',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 10,
+  },
+  expandedResultsList: {
+    maxHeight: 150,
+    marginTop: 8,
+  },
+
+  // Drawer Sidebar Overlay
+  drawerOverlay: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 20,
+    flexDirection: 'row',
+  },
+  drawerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  drawerContainer: {
+    width: '75%',
+    backgroundColor: '#1e293b',
+    height: '100%',
+    shadowColor: '#000',
+    shadowOffset: { width: 2, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  drawerSafeArea: {
+    flex: 1,
+  },
+  drawerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  drawerTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  drawerCloseButton: {
+    padding: 4,
+  },
+  drawerCloseText: {
+    color: '#94a3b8',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  drawerContent: {
+    padding: 16,
+  },
+  drawerSectionTitle: {
+    color: '#10b981',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    marginTop: 8,
+  },
+  drawerTogglesContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 8,
+  },
+  drawerDivider: {
+    height: 1,
+    backgroundColor: '#334155',
+    marginVertical: 16,
+  },
+  drawerInput: {
+    backgroundColor: '#334155',
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    height: 40,
+    color: '#f8fafc',
+    fontSize: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  addFavForm: {
+    flexDirection: 'column',
+  },
+  addFavButton: {
+    backgroundColor: '#10b981',
+    borderRadius: 6,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  addFavButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  favMatchText: {
+    color: '#3b82f6',
+    fontSize: 12,
+    marginBottom: 10,
+    fontWeight: '500',
+  },
+  noFavsText: {
+    color: '#64748b',
+    fontSize: 13,
+    fontStyle: 'italic',
+    paddingVertical: 8,
+  },
+  favListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  favListDetails: {
+    flex: 1,
+    marginRight: 10,
+  },
+  favListTitle: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  favListSubtitle: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  deleteFavButton: {
+    padding: 6,
+  },
+  deleteFavText: {
+    fontSize: 16,
   },
 });

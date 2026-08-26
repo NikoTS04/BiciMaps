@@ -280,6 +280,21 @@ export default function App() {
     }
   };
 
+  // Handle manual destination pinning via map long-press (great for offline usage)
+  const handleLongPress = (feature: any) => {
+    if (feature && feature.geometry && feature.geometry.type === 'Point' && Array.isArray(feature.geometry.coordinates)) {
+      const [lng, lat] = feature.geometry.coordinates;
+      const customDest = {
+        id: `custom-${Date.now()}`,
+        name: `Custom Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+        latitude: lat,
+        longitude: lng,
+        isOffline: true,
+      };
+      selectDestination(customDest);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       {/* Floating Search Bar */}
@@ -325,6 +340,7 @@ export default function App() {
           logoEnabled={false}
           attributionEnabled={false}
           onRegionDidChange={handleRegionChange}
+          onLongPress={handleLongPress}
         >
           <MapLibreGL.Camera
             zoomLevel={cameraZoom}

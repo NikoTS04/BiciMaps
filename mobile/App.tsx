@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, ScrollView, TextInput, FlatList, Keyboard } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { findBikeRoute } from './utils/router';
 
@@ -11,44 +12,44 @@ import amenitiesData from './assets/amenities.json';
 // Initialize MapLibre GL
 MapLibreGL.setAccessToken(null);
 
-// OpenStreetMap standard tile style configuration
-const osmStyle = {
-  version: 8,
-  sources: {
-    osm: {
-      type: 'raster',
-      tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      attribution: '&copy; OpenStreetMap contributors',
-    },
-  },
-  layers: [
-    {
-      id: 'osm',
-      type: 'raster',
-      source: 'osm',
-      minzoom: 0,
-      maxzoom: 19,
-    },
-  ],
-};
+// OpenStreetMap Liberty vector style for a clean Waze-like aesthetic
+const mapStyleURL = 'https://tiles.openfreemap.org/styles/liberty';
 
 export default function App() {
   const [bikeLanes, setBikeLanes] = useState<any[]>([]);
   const [amenities, setAmenities] = useState<any[]>([]);
   const [routeInfo, setRouteInfo] = useState<string>('Search for a destination to navigate...');
   const [routeCoordinates, setRouteCoordinates] = useState<any[]>([]);
+  const [routeDistance, setRouteDistance] = useState<number>(0);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [userHeading, setUserHeading] = useState<number>(0);
   const [hasPermission, setHasPermission] = useState<boolean>(false);
 
   // Map camera states
   const [cameraCenter, setCameraCenter] = useState<number[]>([-77.0370, -12.0855]);
   const [cameraZoom, setCameraZoom] = useState<number>(12);
 
-  // Search states
+  // Search input focus states: 'origin' or 'destination'
+  const [searchFocused, setSearchFocused] = useState<'origin' | 'destination'>('destination');
+
+  // Multi-point locations states (origin is null = "My Location")
+  const [origin, setOrigin] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
+  const [originSearchQuery, setOriginSearchQuery] = useState<string>('');
+  
+  const [destination, setDestination] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [destination, setDestination] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
+
+  // Map Layer Toggles
+  const [showBikeLanes, setShowBikeLanes] = useState<boolean>(true);
+  const [showAmenities, setShowAmenities] = useState<boolean>(true);
+
+  // Bookmarks states
+  const [homeLocation, setHomeLocation] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
+  const [workLocation, setWorkLocation] = useState<{ latitude: number; longitude: number; name: string } | null>(null);
+
+  // Active navigation HUD mode state
+  const [isNavigating, setIsNavigating] = useState<boolean>(false);
 
   // Prevent stitching race conditions
   const routeRequestRef = useRef<number>(0);
@@ -68,6 +69,8 @@ export default function App() {
     if (amenitiesData && amenitiesData.features) {
       setAmenities(amenitiesData.features);
     }
+
+    loadFavorites();
 
     let subscription: { remove: () => void } | null = null;
 
@@ -95,7 +98,7 @@ export default function App() {
             setCameraZoom(14);
           }
 
-          // Watch position for offline navigation tracking
+          // Watch position for offline navigation tracking and heading rotations
           subscription = await Location.watchPositionAsync(
             { accuracy: Location.Accuracy.High, distanceInterval: 5 },
             (loc) => {
@@ -104,6 +107,9 @@ export default function App() {
                   latitude: loc.coords.latitude,
                   longitude: loc.coords.longitude,
                 });
+                if (typeof loc.coords.heading === 'number') {
+                  setUserHeading(loc.coords.heading);
+                }
               }
             }
           );
@@ -119,6 +125,40 @@ export default function App() {
       }
     };
   }, []);
+
+  // Load favorites from AsyncStorage
+  const loadFavorites = async () => {
+    try {
+      const home = await AsyncStorage.getItem('bicimaps_home');
+      const work = await AsyncStorage.getItem('bicimaps_work');
+      if (home) setHomeLocation(JSON.parse(home));
+      if (work) setWorkLocation(JSON.parse(work));
+    } catch (e) {
+      console.warn('Failed to load favorites', e);
+    }
+  };
+
+  // Save Home/Work favorite location
+  const saveFavorite = async (type: 'home' | 'work', loc: any) => {
+    try {
+      await AsyncStorage.setItem(`bicimaps_${type}`, JSON.stringify(loc));
+      if (type === 'home') setHomeLocation(loc);
+      else setWorkLocation(loc);
+      alert(`${type === 'home' ? 'Home' : 'Work'} location saved successfully!`);
+    } catch (e) {
+      console.warn('Failed to save favorite', e);
+    }
+  };
+
+  // Navigate to saved Favorite directly
+  const navigateToFavorite = (type: 'home' | 'work') => {
+    const loc = type === 'home' ? homeLocation : workLocation;
+    if (loc) {
+      selectLocation(loc);
+    } else {
+      alert(`To set your ${type === 'home' ? 'Home' : 'Work'} location, search for a destination or drop a pin on the map, then tap 'Set Home' / 'Set Work' in the bottom menu.`);
+    }
+  };
 
   // Map local and route data to GeoJSON for MapLibre ShapeSources
   const bikeLanesGeoJSON = useMemo(() => ({
@@ -170,7 +210,12 @@ export default function App() {
 
   // Geocoding search handler (combines offline local search + OSM Nominatim API)
   const handleSearch = async (text: string) => {
-    setSearchQuery(text);
+    if (searchFocused === 'origin') {
+      setOriginSearchQuery(text);
+    } else {
+      setSearchQuery(text);
+    }
+
     if (!text || text.trim().length < 2) {
       setSearchResults([]);
       return;
@@ -231,11 +276,12 @@ export default function App() {
         });
       }
     } catch (error) {
-      console.warn("Geocoding API fetch omitted/failed (offline mode):", error);
+      console.warn("Geocoding API fetch failed (offline mode):", error);
     }
   };
 
   // Asynchronously query OSRM to stitch street-aligned paths over straight-line transitions
+  // We use the OSRM 'foot' (walking) profile instead of 'driving' to completely ignore vehicle one-way restrictions for bikes!
   const fetchOSRMTransitions = async (
     baseCoords: number[][],
     transitions: any[],
@@ -245,11 +291,10 @@ export default function App() {
     let offset = 0;
 
     for (let t of transitions) {
-      // Abort if route has changed since task started
       if (requestId !== routeRequestRef.current) return;
 
       try {
-        const url = `https://router.project-osrm.org/route/v1/driving/${t.startCoord[0]},${t.startCoord[1]};${t.endCoord[0]},${t.endCoord[1]}?overview=full&geometries=geojson`;
+        const url = `https://router.project-osrm.org/route/v1/foot/${t.startCoord[0]},${t.startCoord[1]};${t.endCoord[0]},${t.endCoord[1]}?overview=full&geometries=geojson`;
         const response = await fetch(url);
         
         if (requestId !== routeRequestRef.current) return;
@@ -275,46 +320,79 @@ export default function App() {
     }
   };
 
-  // Triggered when user selects a destination from the list
-  const selectDestination = (item: any) => {
-    Keyboard.dismiss();
-    setDestination(item);
-    setSearchQuery(item.name);
-    setSearchResults([]);
+  // Centralized route calculator
+  const calculateRoute = (
+    start: { latitude: number; longitude: number } | null,
+    end: { latitude: number; longitude: number; name: string } | null
+  ) => {
+    if (!end) {
+      setRouteCoordinates([]);
+      setRouteDistance(0);
+      return;
+    }
+
+    const originCoords: [number, number] = start
+      ? [start.longitude, start.latitude]
+      : userLocation && typeof userLocation.latitude === 'number' && typeof userLocation.longitude === 'number'
+        ? [userLocation.longitude, userLocation.latitude]
+        : [-77.0311, -12.1111]; // Fallback to Miraflores
+
+    const destCoords: [number, number] = [end.longitude, end.latitude];
 
     const requestId = ++routeRequestRef.current;
 
-    // Update map view to destination
-    setCameraCenter([item.longitude, item.latitude]);
-    setCameraZoom(15);
-
-    // Calculate Dijkstra offline route
     try {
-      const origin: [number, number] = userLocation && typeof userLocation.latitude === 'number' && typeof userLocation.longitude === 'number'
-        ? [userLocation.longitude, userLocation.latitude] 
-        : [-77.0311, -12.1111]; // Fallback to Miraflores
-
-      const destCoords: [number, number] = [item.longitude, item.latitude];
-      const route = findBikeRoute(origin, destCoords, bikeLanes);
+      const route = findBikeRoute(originCoords, destCoords, bikeLanes);
 
       if (route && Array.isArray(route.coordinates)) {
         const maplibreCoords = route.coordinates.map((c) => [c.longitude, c.latitude]);
         setRouteCoordinates(maplibreCoords);
+        setRouteDistance(route.distanceKm);
         setRouteInfo(
-          `Navigating to ${item.name}! Distance: ~${(route.distanceKm * 1000).toFixed(0)}m (${route.distanceKm.toFixed(2)} km)`
+          `Navigating to ${end.name}! Distance: ~${(route.distanceKm * 1000).toFixed(0)}m (${route.distanceKm.toFixed(2)} km)`
         );
 
-        // Fetch street-aligned routes for transitions if online
+        // Fetch OSRM road-aligned paths (using 'foot' profile to bypass car regulations)
         if (route.transitions && route.transitions.length > 0) {
           fetchOSRMTransitions(maplibreCoords, route.transitions, requestId);
         }
       } else {
-        setRouteInfo(`No connected bike lane path found to ${item.name}.`);
+        setRouteInfo(`No connected bike lane path found.`);
       }
     } catch (error) {
-      console.error("Error calculating bike route:", error);
+      console.error("Error calculating route:", error);
       setRouteInfo('Error calculating route.');
     }
+  };
+
+  // Triggered when user selects a search result (either origin or destination)
+  const selectLocation = (item: any) => {
+    Keyboard.dismiss();
+    setSearchResults([]);
+
+    if (searchFocused === 'origin') {
+      setOrigin(item);
+      setOriginSearchQuery(item.name);
+      setCameraCenter([item.longitude, item.latitude]);
+      setCameraZoom(15);
+      
+      calculateRoute(item, destination);
+    } else {
+      setDestination(item);
+      setSearchQuery(item.name);
+      setCameraCenter([item.longitude, item.latitude]);
+      setCameraZoom(15);
+
+      calculateRoute(origin, item);
+    }
+  };
+
+  // Resets custom origin
+  const clearOrigin = () => {
+    setOrigin(null);
+    setOriginSearchQuery('');
+    setSearchResults([]);
+    calculateRoute(null, destination);
   };
 
   // Resets search inputs, route lines, destination pins
@@ -323,6 +401,8 @@ export default function App() {
     setSearchResults([]);
     setDestination(null);
     setRouteCoordinates([]);
+    setRouteDistance(0);
+    setIsNavigating(false);
     setRouteInfo('Search for a destination to navigate...');
     if (userLocation) {
       setCameraCenter([userLocation.longitude, userLocation.latitude]);
@@ -334,42 +414,102 @@ export default function App() {
   const handleLongPress = (feature: any) => {
     if (feature && feature.geometry && feature.geometry.type === 'Point' && Array.isArray(feature.geometry.coordinates)) {
       const [lng, lat] = feature.geometry.coordinates;
-      const customDest = {
+      const customName = `Dropped Pin (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+      const customLoc = {
         id: `custom-${Date.now()}`,
-        name: `Custom Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+        name: customName,
         latitude: lat,
         longitude: lng,
         isOffline: true,
       };
-      selectDestination(customDest);
+      selectLocation(customLoc);
     }
   };
 
+  // Dynamically calculate ETA string based on 15 km/h avg cycling speed
+  const durationMin = useMemo(() => Math.round((routeDistance / 15) * 60), [routeDistance]);
+  const etaString = useMemo(() => {
+    if (routeDistance === 0) return '--:--';
+    const now = new Date();
+    now.setMinutes(now.getMinutes() + durationMin);
+    const hrs = now.getHours().toString().padStart(2, '0');
+    const mins = now.getMinutes().toString().padStart(2, '0');
+    return `${hrs}:${mins}`;
+  }, [routeDistance, durationMin]);
+
   return (
     <SafeAreaView style={styles.container}>
-      {/* Floating Search Bar */}
+      {/* Floating HUD Search Bar & Shortcuts */}
       <View style={styles.searchContainer}>
-        <View style={styles.searchBarRow}>
+        {/* Origin Search Field */}
+        <View style={[styles.searchBarRow, searchFocused === 'origin' && styles.searchBarRowActive]}>
+          <Text style={styles.searchPrefix}>🟢 From:</Text>
           <TextInput
             style={styles.searchInput}
-            placeholder="🔍 Search address or bike facility..."
+            placeholder="My Location (GPS)"
             placeholderTextColor="#94a3b8"
-            value={searchQuery}
+            value={origin ? origin.name : originSearchQuery}
             onChangeText={handleSearch}
+            onFocus={() => {
+              setSearchFocused('origin');
+              setSearchResults([]);
+            }}
           />
-          {searchQuery.length > 0 && (
+          {origin && (
+            <TouchableOpacity style={styles.clearButton} onPress={clearOrigin}>
+              <Text style={styles.clearButtonText}>✕</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Separator Line */}
+        <View style={styles.searchSeparator} />
+
+        {/* Destination Search Field */}
+        <View style={[styles.searchBarRow, searchFocused === 'destination' && styles.searchBarRowActive]}>
+          <Text style={styles.searchPrefix}>🔴 To:</Text>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search address or bike facility..."
+            placeholderTextColor="#94a3b8"
+            value={destination ? destination.name : searchQuery}
+            onChangeText={handleSearch}
+            onFocus={() => {
+              setSearchFocused('destination');
+              setSearchResults([]);
+            }}
+          />
+          {destination && (
             <TouchableOpacity style={styles.clearButton} onPress={clearSearch}>
               <Text style={styles.clearButtonText}>✕</Text>
             </TouchableOpacity>
           )}
         </View>
+
+        {/* Favorite Places row */}
+        {!destination && searchQuery.length === 0 && originSearchQuery.length === 0 && (
+          <View style={styles.favoritesRow}>
+            <TouchableOpacity style={styles.favoriteButton} onPress={() => navigateToFavorite('home')}>
+              <Text style={styles.favoriteButtonText}>
+                🏠 Home: {homeLocation ? 'Go' : 'Set'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.favoriteButton} onPress={() => navigateToFavorite('work')}>
+              <Text style={styles.favoriteButtonText}>
+                💼 Work: {workLocation ? 'Go' : 'Set'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Search results dropdown */}
         {searchResults.length > 0 && (
           <FlatList
             style={styles.resultsList}
             data={searchResults}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
-              <TouchableOpacity style={styles.resultItem} onPress={() => selectDestination(item)}>
+              <TouchableOpacity style={styles.resultItem} onPress={() => selectLocation(item)}>
                 <Text style={styles.resultText}>
                   {item.name}{' '}
                   {item.isOffline ? (
@@ -380,52 +520,100 @@ export default function App() {
             )}
           />
         )}
+
+        {/* Layer Visibility Toggle Chips */}
+        {!destination && searchQuery.length === 0 && originSearchQuery.length === 0 && (
+          <View style={styles.filterChipsRow}>
+            <TouchableOpacity 
+              style={[styles.filterChip, showBikeLanes && styles.filterChipActive]} 
+              onPress={() => setShowBikeLanes(prev => !prev)}
+            >
+              <Text style={[styles.filterChipText, showBikeLanes && styles.filterChipTextActive]}>
+                🚴 Ciclovías: {showBikeLanes ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.filterChip, showAmenities && styles.filterChipActive]} 
+              onPress={() => setShowAmenities(prev => !prev)}
+            >
+              <Text style={[styles.filterChipText, showAmenities && styles.filterChipTextActive]}>
+                🅿️ Bici-Parking: {showAmenities ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
+
+      {/* Top Guidance Direction HUD */}
+      {isNavigating && destination && (
+        <View style={styles.guidanceHUD}>
+          <Text style={styles.guidanceHUDDirection}>🏁 Navigating along bike lanes</Text>
+          <Text style={styles.guidanceHUDStreet} numberOfLines={1}>
+            Heading towards: {destination.name}
+          </Text>
+        </View>
+      )}
 
       {/* MapLibre Map View */}
       <View style={styles.mapContainer}>
         <MapLibreGL.MapView
           style={styles.map}
-          mapStyle={osmStyle}
+          mapStyle={mapStyleURL}
           logoEnabled={false}
           attributionEnabled={false}
           onRegionDidChange={handleRegionChange}
           onLongPress={handleLongPress}
         >
           <MapLibreGL.Camera
-            zoomLevel={cameraZoom}
-            centerCoordinate={cameraCenter}
+            zoomLevel={isNavigating ? 16.5 : cameraZoom}
+            centerCoordinate={isNavigating && userLocation ? [userLocation.longitude, userLocation.latitude] : cameraCenter}
+            heading={isNavigating ? userHeading : 0}
+            pitch={isNavigating ? 45 : 0}
             animationMode="flyTo"
-            animationDuration={2000}
+            animationDuration={1500}
           />
 
           {/* Render GPS location dot natively */}
           {hasPermission && <MapLibreGL.UserLocation />}
 
+          {/* Custom Origin Pin Annotation */}
+          {origin && (
+            <MapLibreGL.PointAnnotation
+              id="originAnnotation"
+              coordinate={[origin.longitude, origin.latitude]}
+            >
+              <View style={styles.originMarker} />
+            </MapLibreGL.PointAnnotation>
+          )}
+
           {/* Render Bike Lanes (LineStrings) */}
-          <MapLibreGL.ShapeSource id="bikeLanesSource" shape={bikeLanesGeoJSON}>
-            <MapLibreGL.LineLayer
-              id="bikeLanesLayer"
-              style={{
-                lineColor: '#22c55e',
-                lineWidth: 4,
-                lineOpacity: 0.85,
-              }}
-            />
-          </MapLibreGL.ShapeSource>
+          {showBikeLanes && (
+            <MapLibreGL.ShapeSource id="bikeLanesSource" shape={bikeLanesGeoJSON}>
+              <MapLibreGL.LineLayer
+                id="bikeLanesLayer"
+                style={{
+                  lineColor: '#10b981', // Emerald green
+                  lineWidth: 4.5,
+                  lineOpacity: 0.85,
+                }}
+              />
+            </MapLibreGL.ShapeSource>
+          )}
 
           {/* Render Amenities (Points / Parking / Parking spots) */}
-          <MapLibreGL.ShapeSource id="amenitiesSource" shape={amenitiesGeoJSON}>
-            <MapLibreGL.CircleLayer
-              id="amenitiesLayer"
-              style={{
-                circleColor: '#f59e0b',
-                circleRadius: 6,
-                circleStrokeColor: '#ffffff',
-                circleStrokeWidth: 1.5,
-              }}
-            />
-          </MapLibreGL.ShapeSource>
+          {showAmenities && (
+            <MapLibreGL.ShapeSource id="amenitiesSource" shape={amenitiesGeoJSON}>
+              <MapLibreGL.CircleLayer
+                id="amenitiesLayer"
+                style={{
+                  circleColor: '#f59e0b', // Amber Orange
+                  circleRadius: 6,
+                  circleStrokeColor: '#ffffff',
+                  circleStrokeWidth: 1.5,
+                }}
+              />
+            </MapLibreGL.ShapeSource>
+          )}
 
           {/* Render Calculated Dijkstra Route */}
           {routeGeoJSON && (
@@ -433,7 +621,7 @@ export default function App() {
               <MapLibreGL.LineLayer
                 id="routeLayer"
                 style={{
-                  lineColor: '#3b82f6',
+                  lineColor: '#3b82f6', // Waze Blue
                   lineWidth: 6,
                   lineCap: 'round',
                   lineJoin: 'round',
@@ -455,7 +643,7 @@ export default function App() {
       </View>
 
       {/* Floating Action Buttons (Zoom & GPS Re-center) */}
-      <View style={styles.floatingButtonsContainer}>
+      <View style={[styles.floatingButtonsContainer, destination && { bottom: 185 }]}>
         {/* Zoom In */}
         <TouchableOpacity style={styles.floatingButton} onPress={() => setCameraZoom((prev) => Math.min(prev + 1, 20))}>
           <Text style={styles.buttonIconText}>＋</Text>
@@ -475,12 +663,63 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
-      {/* Control Panel at the bottom */}
-      <View style={styles.controlPanel}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.infoScroll}>
-          <Text style={styles.infoText}>{routeInfo}</Text>
-        </ScrollView>
-      </View>
+      {/* Control Panel / Bottom HUD Sheet */}
+      {destination ? (
+        <View style={styles.bottomHUDCard}>
+          <View style={styles.hudHeader}>
+            <Text style={styles.hudDestName} numberOfLines={1}>{destination.name}</Text>
+            <TouchableOpacity onPress={clearSearch} style={styles.hudCloseButton}>
+              <Text style={styles.hudCloseText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.hudMetricsRow}>
+            <View style={styles.hudMetric}>
+              <Text style={styles.hudMetricValue}>{etaString}</Text>
+              <Text style={styles.hudMetricLabel}>ETA</Text>
+            </View>
+            <View style={styles.hudMetric}>
+              <Text style={styles.hudMetricValue}>{durationMin} min</Text>
+              <Text style={styles.hudMetricLabel}>Duration</Text>
+            </View>
+            <View style={styles.hudMetric}>
+              <Text style={styles.hudMetricValue}>{routeDistance.toFixed(1)} km</Text>
+              <Text style={styles.hudMetricLabel}>Distance</Text>
+            </View>
+          </View>
+
+          <View style={styles.hudActionsRow}>
+            <TouchableOpacity 
+              style={[styles.actionButton, isNavigating ? styles.actionButtonActive : styles.actionButtonStart]} 
+              onPress={() => setIsNavigating(prev => !prev)}
+            >
+              <Text style={styles.actionButtonText}>
+                {isNavigating ? '⏹️ Stop Nav' : '▶️ Start Nav'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.actionButtonSecondary} 
+              onPress={() => saveFavorite('home', destination)}
+            >
+              <Text style={styles.actionButtonTextSecondary}>🏠 Set Home</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.actionButtonSecondary} 
+              onPress={() => saveFavorite('work', destination)}
+            >
+              <Text style={styles.actionButtonTextSecondary}>💼 Set Work</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.controlPanel}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.infoScroll}>
+            <Text style={styles.infoText}>{routeInfo}</Text>
+          </ScrollView>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -512,12 +751,29 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingRight: 8,
   },
+  searchBarRowActive: {
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+  },
+  searchSeparator: {
+    height: 1,
+    backgroundColor: '#334155',
+    marginHorizontal: 12,
+  },
+  searchPrefix: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: 'bold',
+    marginLeft: 12,
+    minWidth: 55,
+  },
   searchInput: {
     flex: 1,
-    height: 48,
-    paddingHorizontal: 16,
+    height: 44,
+    paddingHorizontal: 10,
     color: '#f8fafc',
-    fontSize: 16,
+    fontSize: 15,
   },
   clearButton: {
     padding: 8,
@@ -551,6 +807,87 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     overflow: 'hidden',
   },
+  filterChipsRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    paddingTop: 8,
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#334155',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  filterChipActive: {
+    backgroundColor: '#0f766e',
+    borderColor: '#14b8a6',
+  },
+  filterChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterChipTextActive: {
+    color: '#f8fafc',
+  },
+  favoritesRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    justifyContent: 'space-between',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+  },
+  favoriteButton: {
+    flex: 1,
+    backgroundColor: '#334155',
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginHorizontal: 4,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  favoriteButtonText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  guidanceHUD: {
+    position: 'absolute',
+    top: 210, // Shift down to avoid overlap with double search inputs
+    left: 16,
+    right: 16,
+    zIndex: 10,
+    backgroundColor: '#1e293b',
+    borderRadius: 8,
+    padding: 14,
+    borderLeftWidth: 5,
+    borderLeftColor: '#10b981',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  guidanceHUDDirection: {
+    color: '#10b981',
+    fontSize: 15,
+    fontWeight: 'bold',
+    marginBottom: 2,
+  },
+  guidanceHUDStreet: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '500',
+  },
   mapContainer: {
     flex: 1,
   },
@@ -571,9 +908,22 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 4,
   },
+  originMarker: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#10b981', // emerald green
+    borderWidth: 3,
+    borderColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 4,
+  },
   floatingButtonsContainer: {
     position: 'absolute',
-    bottom: 90, // Sits above the bottom control panel
+    bottom: 90,
     right: 16,
     zIndex: 10,
     flexDirection: 'column',
@@ -611,6 +961,105 @@ const styles = StyleSheet.create({
   infoText: {
     color: '#cbd5e1',
     fontSize: 14,
+    fontWeight: '600',
+  },
+  bottomHUDCard: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#1e293b',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 10,
+  },
+  hudHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  hudDestName: {
+    color: '#f8fafc',
+    fontSize: 17,
+    fontWeight: 'bold',
+    flex: 1,
+    marginRight: 12,
+  },
+  hudCloseButton: {
+    padding: 4,
+  },
+  hudCloseText: {
+    color: '#94a3b8',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  hudMetricsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    backgroundColor: '#0f172a',
+    borderRadius: 8,
+    paddingVertical: 12,
+    marginBottom: 14,
+  },
+  hudMetric: {
+    alignItems: 'center',
+  },
+  hudMetricValue: {
+    color: '#3b82f6',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  hudMetricLabel: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  hudActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  actionButton: {
+    flex: 1.5,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginRight: 6,
+  },
+  actionButtonStart: {
+    backgroundColor: '#3b82f6',
+  },
+  actionButtonActive: {
+    backgroundColor: '#ef4444',
+  },
+  actionButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  actionButtonSecondary: {
+    flex: 1,
+    backgroundColor: '#334155',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginLeft: 4,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  actionButtonTextSecondary: {
+    color: '#cbd5e1',
+    fontSize: 12,
     fontWeight: '600',
   },
 });

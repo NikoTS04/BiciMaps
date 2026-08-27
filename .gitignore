@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+mobile/node_modules/
+
+# Local builds
+*.apk
+*.aab
+**/android/app/build/
+**/android/.gradle/
+**/android/build/
+local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation / Readme files (as requested)
+README.MD
+README.md
+readme.md
+**/BUILD.md
+**/improvements.md
+**/PLAN.md
+PLAN.md
